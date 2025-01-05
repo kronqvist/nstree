@@ -43,7 +43,7 @@ Run the program directly to visualize the process tree:
 ./nstree --show-threads
 ```
 
-- `--filter=TYPE`: Filters processes based on namespace differences. You can specify multiple filters.
+- `--filter=TYPE`: Filters processes based on namespace differences. You can specify multiple filters. Use `--filter` alone to include only processes with any namespace differences.
 
 ```bash
 ./nstree --filter=net --filter=pid

@@ -440,7 +440,27 @@ static int has_requested_namespace_diff(const ProcInfo *proc,
   for (size_t f = 0; f < g_filterCount; f++) {
     const char *filterType = g_filters[f];
 
-    /* Find child's inode for this filter type */
+    /* If the filter is "*", check if there's a difference in ANY namespace. */
+    if (strcmp(filterType, "*") == 0) {
+      for (size_t i = 0; i < proc->nsCount; i++) {
+        const char *childInode = proc->namespaces[i].inode;
+        const char *childType = proc->namespaces[i].type;
+
+        if (!parentNs) {
+          /* No parent => any namespace the child has is considered new. */
+          return 1;
+        } else {
+          const char *parentInode =
+              find_namespace_inode(parentNs, parentNsCount, childType);
+          if (!parentInode || strcmp(parentInode, childInode) != 0) {
+            return 1;
+          }
+        }
+      }
+      /* If we get here, no difference in any namespace, check next filter. */
+      continue;
+    }
+
     const char *childInode = NULL;
     for (size_t i = 0; i < proc->nsCount; i++) {
       if (strcmp(proc->namespaces[i].type, filterType) == 0) {
@@ -450,7 +470,7 @@ static int has_requested_namespace_diff(const ProcInfo *proc,
     }
 
     if (!parentNs) {
-      /* If there's no parent, having any childInode means it's new. */
+      /* If there's no parent, having this childInode means it's new. */
       if (childInode)
         return 1;
       else
@@ -595,7 +615,9 @@ static void print_usage(const char *argv0) {
   printf("                     from their parent. May be specified multiple "
          "times.\n");
   printf("                     Available filters: net, pid, mnt, ipc, uts,"
-         "user, cgroup.\n\n");
+         " user, cgroup.\n");
+  printf("  --filter           Prune paths that do not differ in *any* "
+         "namespace.\n\n");
   printf(
       "By default, if no --filter arguments are provided, the entire tree is "
       "shown.\n"
@@ -623,6 +645,9 @@ int main(int argc, char *argv[]) {
       if (*type) {
         g_filters[g_filterCount++] = type;
       }
+    } else if (strcmp(argv[i], "--filter") == 0) {
+      /* If user passed --filter with no type, treat it as wildcard "*" */
+      g_filters[g_filterCount++] = "*";
     } else {
       fprintf(stderr, "Unknown option: %s\n", argv[i]);
       print_usage(argv[0]);
