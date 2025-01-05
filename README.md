@@ -10,13 +10,15 @@ This utility is a Linux command-line tool that visualizes the process tree, simi
 - Displays namespace information (`/proc/[pid]/ns/*`) for each process.
 - Highlights namespaces that differ from the parent process.
 - Supports common namespace types such as `ipc`, `uts`, `net`, `pid`, `user`, `mnt`, `cgroup`, and more.
+- Optionally includes threads in the tree view.
+- Allows filtering processes based on namespace differences.
 
 ## Compilation
 
 The utility is written in C and relies on standard Linux APIs. To compile it, use the following command:
 
 ```bash
-gcc -o nstree nstree.c
+gcc -o nstree main.c
 ```
 
 ## Usage
@@ -34,6 +36,31 @@ Run the program directly to visualize the process tree:
 ```bash
 ./nstree --help
 ```
+
+- `--show-threads`, `-t`: Includes threads in the tree view.
+
+```bash
+./nstree --show-threads
+```
+
+- `--filter=TYPE`: Filters processes based on namespace differences. You can specify multiple filters.
+
+```bash
+./nstree --filter=net --filter=pid
+```
+
+### Filters
+
+Available namespace filters:
+- `net`
+- `pid`
+- `mnt`
+- `ipc`
+- `uts`
+- `user`
+- `cgroup`
+
+If no filters are specified, the entire process tree is displayed.
 
 ## Output Format
 
@@ -54,8 +81,8 @@ init(1)
 
 - Requires root privileges for accessing all `/proc` entries.
 - Outputs namespaces only if they differ from the parent.
-
+- Thread information is hidden by default and must be enabled using the `--show-threads` option.
 
 ## Acknowledgments
 
-Inspired by the `pstree` utility and Linux namespaces documentation.
+Inspired by the `pstree` utility.

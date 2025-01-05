@@ -56,6 +56,7 @@ typedef struct {
  * @nsCount:    Number of namespaces actually read
  * @children:   Dynamic array of pointers to child ProcInfo structs
  * @childCount: How many children this process has
+ * @keep:       Used to determine if this process is shown after filters
  */
 typedef struct ProcInfo {
   pid_t pid;
@@ -68,6 +69,8 @@ typedef struct ProcInfo {
 
   struct ProcInfo **children;
   size_t childCount;
+
+  int keep;
 } ProcInfo;
 
 /* Global dynamic list of all processes/threads discovered. */
@@ -77,6 +80,10 @@ static size_t g_procCapacity = 0; /* allocated capacity */
 
 /* By default, do NOT show threads. Can be overridden with --show-threads/-t */
 static int show_threads = 0;
+
+/* List of namespace filters. If none are specified, we show everything. */
+static const char *g_filters[32];
+static size_t g_filterCount = 0;
 
 /**
  * is_number - Checks if a string is entirely numeric
@@ -260,6 +267,7 @@ static void read_proc_info(const char *statPath, int isThread) {
   pInfo->isThread = isThread;
   pInfo->children = NULL;
   pInfo->childCount = 0;
+  pInfo->keep = 0;
 
   /* Parse /proc/<pid>/stat style line */
   parse_proc_stat_line(line, pInfo);
@@ -292,10 +300,9 @@ static void read_proc_info(const char *statPath, int isThread) {
     const char *afterProc = statPath + 6; /* skip "/proc/" */
     char *slashTask = strstr((char *)afterProc, "/task/");
     if (slashTask) {
-      /* Temporarily terminate after the main PID */
       *slashTask = '\0';
       pInfo->ppid = (pid_t)atoi(afterProc);
-      *slashTask = '/'; /* optional restore */
+      *slashTask = '/';
     }
   }
 
@@ -417,6 +424,81 @@ static const char *find_namespace_inode(const NamespaceEntry *list,
 }
 
 /**
+ * has_requested_namespace_diff - Checks if 'proc' differs in any requested
+ * namespace filter from the parent's namespaces.
+ * If parentNs == NULL, treat as "no parent," so differences are considered if
+ * the child has that namespace at all.
+ */
+static int has_requested_namespace_diff(const ProcInfo *proc,
+                                        const NamespaceEntry *parentNs,
+                                        size_t parentNsCount) {
+  /* If no filters => we won't prune on differences. */
+  if (g_filterCount == 0) {
+    return 0;
+  }
+
+  for (size_t f = 0; f < g_filterCount; f++) {
+    const char *filterType = g_filters[f];
+
+    /* Find child's inode for this filter type */
+    const char *childInode = NULL;
+    for (size_t i = 0; i < proc->nsCount; i++) {
+      if (strcmp(proc->namespaces[i].type, filterType) == 0) {
+        childInode = proc->namespaces[i].inode;
+        break;
+      }
+    }
+
+    if (!parentNs) {
+      /* If there's no parent, having any childInode means it's new. */
+      if (childInode)
+        return 1;
+      else
+        continue;
+    }
+
+    /* Compare child's inode with parent's inode for the same type */
+    if (childInode) {
+      const char *parentInode =
+          find_namespace_inode(parentNs, parentNsCount, filterType);
+      if (!parentInode || strcmp(parentInode, childInode) != 0) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+/**
+ * mark_keep_processes - Recursively mark which processes to keep.
+ * Return 1 if 'proc' or any descendant is kept, else 0.
+ *
+ * If no filters are specified, every process is kept.
+ */
+static int mark_keep_processes(ProcInfo *proc, const NamespaceEntry *parentNs,
+                               size_t parentNsCount) {
+  if (g_filterCount == 0) {
+    /* No filters => keep everything. */
+    proc->keep = 1;
+  } else {
+    /* Keep if there's a difference in any requested namespace. */
+    int differs = has_requested_namespace_diff(proc, parentNs, parentNsCount);
+    proc->keep = (differs ? 1 : 0);
+  }
+
+  /* Recurse on children; if a child is kept, we also keep this proc. */
+  for (size_t i = 0; i < proc->childCount; i++) {
+    ProcInfo *child = proc->children[i];
+    int childKept = mark_keep_processes(child, proc->namespaces, proc->nsCount);
+    if (childKept) {
+      proc->keep = 1;
+    }
+  }
+
+  return proc->keep;
+}
+
+/**
  * print_tree - Recursively print the process tree with namespace differences
  * @proc:           pointer to the current ProcInfo
  * @prefix:         prefix string for tree indentation
@@ -425,16 +507,21 @@ static const char *find_namespace_inode(const NamespaceEntry *list,
  * @parentNsCount:  how many namespaces in parent's array
  *
  * This prints the tree comparing each child's namespaces to its parent's.
+ * The tree lines are updated so that if the node is the last kept child,
+ * we print "└─" instead of "├─".
  */
 static void print_tree(const ProcInfo *proc, const char *prefix, int isLast,
                        const NamespaceEntry *parentNs, size_t parentNsCount) {
+  /* If this node is pruned, skip it. */
+  if (!proc->keep) {
+    return;
+  }
+
   /* Print the tree branch prefix */
   printf("%s", prefix);
   printf("%s", isLast ? "└─" : "├─");
 
   /* If it's a thread, comm is typically in braces, e.g. {bash} */
-  /* We did not forcibly rename comm here, but we can show a marker if we
-   * like.*/
   if (proc->isThread) {
     printf("{%s}(%d)", proc->comm, proc->pid);
   } else {
@@ -448,7 +535,8 @@ static void print_tree(const ProcInfo *proc, const char *prefix, int isLast,
     const char *childInode = proc->namespaces[i].inode;
 
     const char *parentInode =
-        find_namespace_inode(parentNs, parentNsCount, childType);
+        (parentNs ? find_namespace_inode(parentNs, parentNsCount, childType)
+                  : NULL);
     if (!parentInode || strcmp(parentInode, childInode) != 0) {
       if (firstNsPrinted) {
         printf(" [");
@@ -469,9 +557,24 @@ static void print_tree(const ProcInfo *proc, const char *prefix, int isLast,
   snprintf(newPrefix, sizeof(newPrefix), "%s%s", prefix,
            (isLast ? "  " : "│ "));
 
+  /*
+   * Find which child is actually the last 'kept' child
+   * so that we show "└─" instead of "├─" for that child.
+   */
+  int lastKeptIdx = -1;
+  for (int i = (int)proc->childCount - 1; i >= 0; i--) {
+    if (proc->children[i]->keep) {
+      lastKeptIdx = i;
+      break;
+    }
+  }
+
   /* Recurse for children */
   for (size_t i = 0; i < proc->childCount; i++) {
-    print_tree(proc->children[i], newPrefix, (i == proc->childCount - 1),
+    if (!proc->children[i]->keep) {
+      continue;
+    }
+    print_tree(proc->children[i], newPrefix, (int)i == lastKeptIdx,
                proc->namespaces, proc->nsCount);
   }
 }
@@ -482,12 +585,23 @@ static void print_tree(const ProcInfo *proc, const char *prefix, int isLast,
 static void print_usage(const char *argv0) {
   printf("Usage: %s [OPTIONS]\n", argv0);
   printf(
-      "A Linux utility that visualizes the process tree like pstree while\n");
-  printf(
+      "A Linux utility that visualizes the process tree like pstree while\n"
       "displaying namespace information. Threads are hidden by default.\n\n");
   printf("Options:\n");
   printf("  --help, -h         Show this help message and exit.\n");
-  printf("  --show-threads, -t Include threads in the tree.\n\n");
+  printf("  --show-threads, -t Include threads in the tree.\n");
+  printf("  --filter=TYPE      Only keep processes that differ in this "
+         "namespace\n");
+  printf("                     from their parent. May be specified multiple "
+         "times.\n");
+  printf("                     Available filters: net, pid, mnt, ipc, uts,"
+         "user, cgroup.\n\n");
+  printf(
+      "By default, if no --filter arguments are provided, the entire tree is "
+      "shown.\n"
+      "If one or more filters are specified, only processes that differ in at\n"
+      "least one of those namespaces or lead to a process that does are "
+      "shown.\n");
 }
 
 /**
@@ -504,6 +618,11 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "--show-threads") == 0 ||
                strcmp(argv[i], "-t") == 0) {
       show_threads = 1;
+    } else if (strncmp(argv[i], "--filter=", 9) == 0) {
+      const char *type = argv[i] + 9; /* skip "--filter=" */
+      if (*type) {
+        g_filters[g_filterCount++] = type;
+      }
     } else {
       fprintf(stderr, "Unknown option: %s\n", argv[i]);
       print_usage(argv[0]);
@@ -514,9 +633,10 @@ int main(int argc, char *argv[]) {
   gather_processes_and_threads();
   build_process_tree();
 
-  /* Find PID 1 and print from there */
+  /* Find PID 1 and print from there, marking keep first if filters are used */
   for (size_t i = 0; i < g_procCount; i++) {
     if (g_processes[i].pid == 1 && g_processes[i].isThread == 0) {
+      mark_keep_processes(&g_processes[i], NULL, 0);
       print_tree(&g_processes[i], "", 1, NULL, 0);
       break;
     }
