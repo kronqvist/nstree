@@ -54,6 +54,7 @@ typedef struct {
  * @isThread:   Non-zero if this is a thread, zero if a main process
  * @namespaces: Array storing up to MAX_NAMESPACES for each process
  * @nsCount:    Number of namespaces actually read
+ * @nsReadable: 1 if we read namespaces, 0 if not
  * @children:   Dynamic array of pointers to child ProcInfo structs
  * @childCount: How many children this process has
  * @keep:       Used to determine if this process is shown after filters
@@ -66,6 +67,7 @@ typedef struct ProcInfo {
 
   NamespaceEntry namespaces[MAX_NAMESPACES];
   size_t nsCount;
+  int nsReadable;
 
   struct ProcInfo **children;
   size_t childCount;
@@ -77,6 +79,7 @@ typedef struct ProcInfo {
 static ProcInfo *g_processes = NULL;
 static size_t g_procCount = 0;    /* how many entries used */
 static size_t g_procCapacity = 0; /* allocated capacity */
+static int g_unreadableFound = 0; /* track unreadable ns */
 
 /* By default, do NOT show threads. Can be overridden with --show-threads/-t */
 static int show_threads = 0;
@@ -142,9 +145,12 @@ static void read_namespaces(ProcInfo *proc, const char *pidPath) {
   char nsPath[PATH_MAX];
   snprintf(nsPath, sizeof(nsPath), "%s/ns", pidPath);
 
+  proc->nsReadable = 0;
+
   DIR *dir = opendir(nsPath);
   if (!dir) {
     proc->nsCount = 0;
+    g_unreadableFound = 1;
     return;
   }
 
@@ -171,6 +177,7 @@ static void read_namespaces(ProcInfo *proc, const char *pidPath) {
   }
 
   closedir(dir);
+  proc->nsReadable = 1;
   proc->nsCount = idx;
 }
 
@@ -548,6 +555,11 @@ static void print_tree(const ProcInfo *proc, const char *prefix, int isLast,
     printf("%s(%d)", proc->comm, proc->pid);
   }
 
+  /* If namespaces were unreadable, add an asterisk */
+  if (!proc->nsReadable) {
+	  printf("*");
+  }
+
   /* Determine which namespaces differ from the parent's */
   int firstNsPrinted = 1;
   for (size_t i = 0; i < proc->nsCount; i++) {
@@ -657,6 +669,10 @@ int main(int argc, char *argv[]) {
 
   gather_processes_and_threads();
   build_process_tree();
+
+  if (g_unreadableFound) {
+	  fprintf(stderr, "Warning, namespaces that could not be read is marked with an asterisk. Run as root for full info.\n");
+  }
 
   /* Find PID 1 and print from there, marking keep first if filters are used */
   for (size_t i = 0; i < g_procCount; i++) {
