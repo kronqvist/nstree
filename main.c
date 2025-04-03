@@ -337,13 +337,13 @@ static void gather_processes_and_threads(void) {
       continue; /* skip non-numeric directories */
 
     /* Read the main process's /stat first */
-    char statPath[512];
+    char statPath[PATH_MAX];
     snprintf(statPath, sizeof(statPath), "/proc/%s/stat", entry->d_name);
     read_proc_info(statPath, 0 /* isThread=0 */);
 
     /* Conditionally read each thread in /proc/<pid>/task/ if show_threads=1 */
     if (show_threads) {
-      char taskDirPath[512];
+      char taskDirPath[PATH_MAX];
       snprintf(taskDirPath, sizeof(taskDirPath), "/proc/%s/task",
                entry->d_name);
 
@@ -361,9 +361,16 @@ static void gather_processes_and_threads(void) {
             continue;
 
           /* Construct /proc/<pid>/task/<tid>/stat path */
-          char tstatPath[512];
-          snprintf(tstatPath, sizeof(tstatPath), "%s/%s/stat", taskDirPath,
-                   dt->d_name);
+          char tstatPath[PATH_MAX];
+	  int len = snprintf(tstatPath, sizeof(tstatPath),
+			     "%s/%s/stat", taskDirPath, dt->d_name);
+
+	  /* Should never happen. But keeps gcc happy */
+	  if (len < 0 || (size_t)len >= sizeof(tstatPath)) {
+		  fprintf(stderr, "Path too long: %s/%s/stat\n",
+			  taskDirPath, dt->d_name);
+		  continue;
+	  }
 
           read_proc_info(tstatPath, 1 /* isThread=1 */);
         }
